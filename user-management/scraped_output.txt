@@ -1,0 +1,1799 @@
+=== FILE: ./scraped_output.txt ===
+
+
+=== FILE: ./requirements.txt ===
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+sqlalchemy==2.0.29
+pydantic==2.6.4
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+boto3==1.34.77
+psycopg2-binary==2.9.9
+pydantic[email]
+python-multipart
+
+=== FILE: ./Dockerfile ===
+FROM python:3.10-slim
+
+# Copy everything into /app
+WORKDIR /app
+COPY ./app /app/app
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ✅ Set PYTHONPATH so that `app` is recognized as a top-level module
+ENV PYTHONPATH=/app
+
+# ✅ Run from top-level and import app.main:app
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+=== FILE: ./.gitignore ===
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+# Environments
+.env
+.venv/
+venv/
+ENV/
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# FastAPI-specific
+instance/
+*.db
+*.sqlite3
+
+# VSCode / Editors
+.vscode/
+.idea/
+*.sw?
+*.bak
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Docker
+*.pid
+*.pid.lock
+docker-compose.override.yml
+
+# Mypy / Pylint / Coverage
+.mypy_cache/
+coverage.xml
+*.cover
+*.lprof
+.cache/
+
+# AWS/GCP/Secrets
+*.pem
+*.key
+*.crt
+.secret
+*.env.local
+
+
+=== FILE: ./scrape.py ===
+import os
+
+def scrape_directory(base_dir, output_file):
+    with open(output_file, 'w', encoding='utf-8') as out_f:
+        for root, dirs, files in os.walk(base_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                except Exception as e:
+                    content = f"<Could not read file: {e}>"
+
+                out_f.write(f"=== FILE: {file_path} ===\n")
+                out_f.write(content + "\n\n")
+                print(f"Processed: {file_path}")
+
+if __name__ == "__main__":
+    # Replace '.' with your target directory, and 'output.txt' with desired output file
+    scrape_directory('.', 'scraped_output.txt')
+
+
+=== FILE: ./app/auth.py ===
+import os
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from typing import Optional
+
+SECRET_KEY = os.environ["SECRET_KEY"]
+ALGORITHM = os.environ.get("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_access_token(token: str) -> Optional[dict]:
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    
+
+=== FILE: ./app/models.py ===
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+
+    preferences = relationship("Preference", back_populates="user")
+    ratings = relationship("Rating", back_populates="user")
+
+
+class Preference(Base):
+    __tablename__ = "preferences"
+    id = Column(Integer, primary_key=True, index=True)
+    cuisine = Column(String, nullable=False)
+    location = Column(String, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"))
+
+    user = relationship("User", back_populates="preferences")
+
+
+class Rating(Base):
+    __tablename__ = "ratings"
+    id = Column(Integer, primary_key=True, index=True)
+    restaurant_id = Column(String, nullable=False)
+    approved = Column(Boolean, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"))
+
+    user = relationship("User", back_populates="ratings")
+
+=== FILE: ./app/database.py ===
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import os
+
+
+DB_USER = os.environ["DB_USER"]
+DB_PASSWORD = os.environ["DB_PASSWORD"]
+DB_NAME = os.environ["DB_NAME"]
+DB_HOST = os.environ["DB_HOST"]
+DB_PORT = os.environ.get("DB_PORT", "5432")
+
+
+SQLALCHEMY_DATABASE_URL = (
+    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode=require"
+)
+
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        
+
+=== FILE: ./app/__init__.py ===
+
+
+=== FILE: ./app/schemas.py ===
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserOut(BaseModel):
+    id: int
+    email: EmailStr
+
+    class Config:
+        orm_mode = True
+
+
+class PreferenceCreate(BaseModel):
+    cuisine: str
+    location: str
+
+
+class PreferenceOut(PreferenceCreate):
+    user_id: int
+
+    class Config:
+        orm_mode = True
+
+
+class RatingCreate(BaseModel):
+    restaurant_id: str
+    approved: bool
+
+
+class RatingOut(RatingCreate):
+    user_id: int
+
+    class Config:
+        orm_mode = True
+
+=== FILE: ./app/main.py ===
+import os
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.routers import users, preferences, ratings
+from app.database import Base, engine
+
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="User Management Service")
+
+frontend_origin = os.environ.get("FRONTEND_ORIGIN", "http://localhost:3000")
+origins = [frontend_origin]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(users.router, prefix="/users", tags=["Users"])
+app.include_router(preferences.router, prefix="/preferences", tags=["Preferences"])
+app.include_router(ratings.router, prefix="/ratings", tags=["Ratings"])
+
+=== FILE: ./app/crud.py ===
+from sqlalchemy.orm import Session
+from app import models, schemas
+from app.auth import get_password_hash, verify_password, create_access_token
+
+
+def create_user(db: Session, user: schemas.UserCreate):
+    hashed_pw = get_password_hash(user.password)
+    db_user = models.User(email=user.email, hashed_password=hashed_pw)
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+
+def authenticate_user(db: Session, email: str, password: str):
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if not user or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def get_user_by_email(db: Session, email: str):
+    return db.query(models.User).filter(models.User.email == email).first()
+
+
+def create_preference(db: Session, user_id: int, pref: schemas.PreferenceCreate):
+    db_pref = models.Preference(**pref.dict(), user_id=user_id)
+    db.add(db_pref)
+    db.commit()
+    db.refresh(db_pref)
+    return db_pref
+
+
+def get_preferences(db: Session, user_id: int):
+    return db.query(models.Preference).filter(models.Preference.user_id == user_id).all()
+
+
+def create_rating(db: Session, user_id: int, rating: schemas.RatingCreate):
+    db_rating = models.Rating(**rating.dict(), user_id=user_id)
+    db.add(db_rating)
+    db.commit()
+    db.refresh(db_rating)
+    return db_rating
+
+
+def get_user_ratings(db: Session, user_id: int):
+    return db.query(models.Rating).filter(models.Rating.user_id == user_id).all()
+
+=== FILE: ./app/routers/users.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from app import schemas, crud, database, auth
+
+router = APIRouter()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="users/login")
+
+
+@router.post("/signup", response_model=schemas.UserOut)
+def signup(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
+    db_user = crud.get_user_by_email(db, email=user.email)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    return crud.create_user(db, user)
+
+
+@router.post("/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(database.get_db)):
+    user = crud.authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = auth.create_access_token(data={"sub": user.email})
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@router.get("/me", response_model=schemas.UserOut)
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(database.get_db)):
+    payload = auth.decode_access_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = crud.get_user_by_email(db, payload["sub"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+=== FILE: ./app/routers/preferences.py ===
+import os
+import boto3
+import json
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app import schemas, crud, auth, database
+from fastapi.security import OAuth2PasswordBearer
+
+router = APIRouter()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="users/login")
+sqs_client = boto3.client("sqs", region_name=os.environ["AWS_REGION"])
+LOCALIZE_QUEUE_URL = os.environ["LOCALIZE_QUEUE_URL"]
+
+
+def get_current_user_email(token: str = Depends(oauth2_scheme)):
+    payload = auth.decode_access_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return payload["sub"]
+
+
+@router.post("/", response_model=schemas.PreferenceOut)
+def create_preference(
+    pref: schemas.PreferenceCreate,
+    db: Session = Depends(database.get_db),
+    email: str = Depends(get_current_user_email),
+):
+    user = crud.get_user_by_email(db, email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    preference = crud.create_preference(db, user_id=user.id, pref=pref)
+
+    message = {
+        "user_id": user.id,
+        "preference_id": preference.id,
+        "cuisine": preference.cuisine,
+        "location": preference.location
+    }
+
+    sqs_client.send_message(
+        QueueUrl=LOCALIZE_QUEUE_URL,
+        MessageBody=json.dumps(message)
+    )
+
+    return preference
+
+
+=== FILE: ./app/routers/__init__.py ===
+
+
+=== FILE: ./app/routers/ratings.py ===
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app import schemas, crud, auth, database
+from fastapi.security import OAuth2PasswordBearer
+
+router = APIRouter()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="users/login")
+
+
+def get_current_user_email(token: str = Depends(oauth2_scheme)):
+    payload = auth.decode_access_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return payload["sub"]
+
+
+@router.post("/", response_model=schemas.RatingOut)
+def create_rating(
+    rating: schemas.RatingCreate,
+    db: Session = Depends(database.get_db),
+    email: str = Depends(get_current_user_email),
+):
+    user = crud.get_user_by_email(db, email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return crud.create_rating(db, user_id=user.id, rating=rating)
+
+=== FILE: ./helm-chart/Chart.yaml ===
+apiVersion: v2
+name: user-management
+version: 0.1.0
+description: User Management microservice for the Restaurant Recommendation System
+
+
+=== FILE: ./helm-chart/values.yaml ===
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+=== FILE: ./helm-chart/templates/deployment.yaml ===
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-management
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-management
+  template:
+    metadata:
+      labels:
+        app: user-management
+    spec:
+      serviceAccountName: microservice-sqs
+      containers:
+        - name: user-management
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: user-management-env
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: user-management-env
+                  key: DB_PASSWORD
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: user-management-env
+                  key: DB_NAME
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: user-management-env
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: user-management-env
+                  key: DB_PORT
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: user-management-env
+                  key: SECRET_KEY
+            - name: ALGORITHM
+              valueFrom:
+                secretKeyRef:
+                  name: user-management-env
+                  key: ALGORITHM
+            - name: ACCESS_TOKEN_EXPIRE_MINUTES
+              valueFrom:
+                secretKeyRef:
+                  name: user-management-env
+                  key: ACCESS_TOKEN_EXPIRE_MINUTES
+
+
+=== FILE: ./helm-chart/templates/ingress.yaml ===
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: user-management-ingress
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: user-management-alb
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/group.name: restaurant-system
+    kubernetes.io/ingress.class: alb
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /users
+            pathType: Prefix
+            backend:
+              service:
+                name: user-management
+                port:
+                  number: 80
+
+
+
+=== FILE: ./helm-chart/templates/service.yaml ===
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-management
+spec:
+  selector:
+    app: user-management
+  ports:
+    - port: 80
+      targetPort: 8000
+
+
+=== FILE: ./.github/workflows/docker-build-and-push.yml ===
+name: Build and Push to ECR
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  SERVICE_NAME: user-management-service
+  ECR_BASE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build and Tag Docker image
+        run: |
+          docker build -t $ECR_BASE/$SERVICE_NAME:${{ env.IMAGE_TAG }} .
+          docker tag $ECR_BASE/$SERVICE_NAME:${{ env.IMAGE_TAG }} $ECR_BASE/$SERVICE_NAME:latest
+
+      - name: Push Docker images to ECR
+        run: |
+          docker push $ECR_BASE/$SERVICE_NAME:${{ env.IMAGE_TAG }}
+          docker push $ECR_BASE/$SERVICE_NAME:latest
+
+      - name: Trigger Terraform Deploy
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GH_PAT }}
+          repository: restaurant-recommendation-hopkins-ep/terraform
+          event-type: deploy-terraform
+          client-payload: |
+            {
+              "image_tag": "${{ env.IMAGE_TAG }}"
+            }
+
+
+=== FILE: ./.git/ORIG_HEAD ===
+d69c5d721de6ca11b066c56f00a9e0cc54268fc9
+
+
+=== FILE: ./.git/config ===
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+	ignorecase = true
+	precomposeunicode = true
+[submodule]
+	active = .
+[remote "origin"]
+	url = https://github.com/restaurant-recommendation-hopkins-ep/user-management.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+[lfs]
+	repositoryformatversion = 0
+
+
+=== FILE: ./.git/HEAD ===
+ref: refs/heads/main
+
+
+=== FILE: ./.git/description ===
+Unnamed repository; edit this file 'description' to name the repository.
+
+
+=== FILE: ./.git/index ===
+<Could not read file: 'utf-8' codec can't decode byte 0x86 in position 15: invalid start byte>
+
+=== FILE: ./.git/packed-refs ===
+# pack-refs with: peeled fully-peeled sorted 
+d69c5d721de6ca11b066c56f00a9e0cc54268fc9 refs/remotes/origin/main
+
+
+=== FILE: ./.git/FETCH_HEAD ===
+8dcd4bff301480b3d4d35672e8ed842b0eed81fd		branch 'main' of https://github.com/restaurant-recommendation-hopkins-ep/user-management
+
+
+=== FILE: ./.git/objects/92/940a5b6baf606886d84baf11abdb7eac0c3376 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/32/bd666f3fd1dfbd9affdc26b93456e9728e5dc2 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/35/97e340041c0982f127ac2d9bf057a18afbf6cb ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/69/afa7ecdf5d281f1724bdeae19061ad36d1bc5e ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/3c/807ed0cf8710f68c965164f2190cd6e6e5762a ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/56/b4ed391ffe9f21fe329096992cd147dd368368 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x88 in position 18: invalid start byte>
+
+=== FILE: ./.git/objects/51/40bae217fa67f2d48e5e71425095aa4360b290 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/94/32a796c5340bea684aa5f6931c40eaeec9ecdb ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/5a/3608ff44620797f6ad1791a464160f6f3f6401 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/5f/6b202ac6c95f230111a2256e79cd94239e6769 ===
+<Could not read file: 'utf-8' codec can't decode byte 0xbd in position 16: invalid start byte>
+
+=== FILE: ./.git/objects/05/4736040e6a4d2ddbb0351be0ab67b063b37b0d ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/9d/2d34270d62421959517f53029e4e1c321b9631 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/9c/6cc5fae07da43f650b521715cc5c630592cfed ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/9c/bfeea34feeb0b8b26051b8cd88aa6d0f877333 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/b4/63739211dd6f3bfc2050af77efa4a6b1396651 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/e2/d0f0278317b4e2792bf7ae36702dbe2a926f7b ===
+<Could not read file: 'utf-8' codec can't decode byte 0xbd in position 16: invalid start byte>
+
+=== FILE: ./.git/objects/c7/0833c7441796f4854530dceda97ebffa44a617 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/ee/16d8e37c97fdc1dc111ae1b89ad7aece5f90e3 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/fc/c481ab1c5909500226e9b36082981edd7ee061 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/fd/d46b10fbdc2572bf7d396cc617df31fa25a820 ===
+<Could not read file: 'utf-8' codec can't decode byte 0xbd in position 16: invalid start byte>
+
+=== FILE: ./.git/objects/f5/feb36a48276336f045828ff161c38040891d51 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/c6/4f1d7b277b4c2171df0cdaee747c00fefcf8eb ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/18/691e642c082ae76e55167140531ce6acf46fd9 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/pack/pack-febf8e880eb797e5acd133fd26d222ecff778a63.rev ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 19: invalid start byte>
+
+=== FILE: ./.git/objects/pack/pack-febf8e880eb797e5acd133fd26d222ecff778a63.pack ===
+<Could not read file: 'utf-8' codec can't decode bytes in position 11-12: invalid continuation byte>
+
+=== FILE: ./.git/objects/pack/pack-febf8e880eb797e5acd133fd26d222ecff778a63.idx ===
+<Could not read file: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte>
+
+=== FILE: ./.git/objects/1f/d1edc8f37bd9f8d4c07e3d69e4c9185f2e9217 ===
+<Could not read file: 'utf-8' codec can't decode byte 0xb2 in position 8: invalid start byte>
+
+=== FILE: ./.git/objects/73/41df31cf9d63fa8ef339cc193024904152a6cb ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/1a/df322ba5df4135c2fb6965eae0900d259b9bdf ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/8a/34dc3aaec75b28939d907bdde51782256ff9d2 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/26/5da5812dc7f921c6701b4632c4bef489650d20 ===
+<Could not read file: 'utf-8' codec can't decode byte 0xb2 in position 8: invalid start byte>
+
+=== FILE: ./.git/objects/44/fd8cd62b3ce111a6b00240aa17bed8a2cba079 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/2a/db59d3ae6094cea12ba36eb0b45646a1713da8 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x88 in position 18: invalid start byte>
+
+=== FILE: ./.git/objects/9f/de86db9828dbeb52fba3cccbd82f76d2827e8b ===
+<Could not read file: 'utf-8' codec can't decode byte 0xc2 in position 6: invalid continuation byte>
+
+=== FILE: ./.git/objects/00/9cba5c0f3e0120a387731e2d7d2b8a9b3f883f ===
+<Could not read file: 'utf-8' codec can't decode byte 0xb2 in position 8: invalid start byte>
+
+=== FILE: ./.git/objects/5d/628556cfde29cf1a27d374194c352ae108f6d4 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/65/39cfa3487a208567cd288e6f5fb59e61d2df32 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/3a/43ac5f1c7ae5a6000626a258d32b75c6f6b9f5 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/3f/34360f8e3b8f7b24d475c585f6df0bb81d5c84 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/6c/7a4ec8c3679fc17fe6c981063eff80445bee37 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/0f/9a827d11aa60ad6fdf96d3fc1eb21deccce2cd ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/a0/fe8f6ad68ed173441d7235ec60cd87b861e1a5 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/b8/efcfd00542da4e4cab6305a66a058be1e5d69c ===
+<Could not read file: 'utf-8' codec can't decode byte 0xbd in position 16: invalid start byte>
+
+=== FILE: ./.git/objects/b8/d3fb7118df7ac2ffcbfc8b9550e96173f31748 ===
+<Could not read file: 'utf-8' codec can't decode byte 0xbd in position 16: invalid start byte>
+
+=== FILE: ./.git/objects/dc/301b70c27a5933e9074f763f1d3e501e7f630f ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/aa/f0338d0a355ee22386303b232c415ce3115e0d ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/b0/f1b902e7cd07ee03da2dcb97f253b02cdecdd5 ===
+<Could not read file: 'utf-8' codec can't decode byte 0xb2 in position 8: invalid start byte>
+
+=== FILE: ./.git/objects/e6/b94659172bedb39ff93c8bc0f904ed838b7ae5 ===
+<Could not read file: 'utf-8' codec can't decode byte 0xa5 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/e9/95dee74cc8e25ccb3f259797dabc9777fb0941 ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/83/f4743209b8811972c92135ea68052d6387e2bc ===
+<Could not read file: 'utf-8' codec can't decode byte 0x88 in position 18: invalid start byte>
+
+=== FILE: ./.git/objects/1b/e9b424514d71b512171cf2b4fb9789b8d5e36a ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/1e/ae77f9bb588fe7208ccd750bff156a08bceeda ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/4a/9470b7c93d0c351b5ac7be2a627ca3e8d7b05d ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/8d/3225531043379e33e2137242d31c8a0bf925bf ===
+<Could not read file: 'utf-8' codec can't decode byte 0xb2 in position 8: invalid start byte>
+
+=== FILE: ./.git/objects/8d/cd4bff301480b3d4d35672e8ed842b0eed81fd ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/49/8fa43d29dc0e9439562e2f6a0a26dc368830ce ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/objects/40/b4c7903fcb4990e48776302b554c56ef05de8e ===
+<Could not read file: 'utf-8' codec can't decode byte 0x95 in position 2: invalid start byte>
+
+=== FILE: ./.git/info/exclude ===
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+
+
+=== FILE: ./.git/logs/HEAD ===
+0000000000000000000000000000000000000000 d69c5d721de6ca11b066c56f00a9e0cc54268fc9 Benjamin <benjaminch3230@gmail.com> 1745431422 -0400	clone: from https://github.com/restaurant-recommendation-hopkins-ep/user-management.git
+d69c5d721de6ca11b066c56f00a9e0cc54268fc9 8dcd4bff301480b3d4d35672e8ed842b0eed81fd Benjamin <benjaminch3230@gmail.com> 1745941342 -0400	pull --ff --recurse-submodules --progress origin: Fast-forward
+
+
+=== FILE: ./.git/logs/refs/heads/main ===
+0000000000000000000000000000000000000000 d69c5d721de6ca11b066c56f00a9e0cc54268fc9 Benjamin <benjaminch3230@gmail.com> 1745431422 -0400	clone: from https://github.com/restaurant-recommendation-hopkins-ep/user-management.git
+d69c5d721de6ca11b066c56f00a9e0cc54268fc9 8dcd4bff301480b3d4d35672e8ed842b0eed81fd Benjamin <benjaminch3230@gmail.com> 1745941342 -0400	pull --ff --recurse-submodules --progress origin: Fast-forward
+
+
+=== FILE: ./.git/logs/refs/remotes/origin/HEAD ===
+0000000000000000000000000000000000000000 d69c5d721de6ca11b066c56f00a9e0cc54268fc9 Benjamin <benjaminch3230@gmail.com> 1745431422 -0400	clone: from https://github.com/restaurant-recommendation-hopkins-ep/user-management.git
+8dcd4bff301480b3d4d35672e8ed842b0eed81fd 8dcd4bff301480b3d4d35672e8ed842b0eed81fd Benjamin Chang <benjamin@Benjamins-MacBook-Pro-2.local> 1745941191 -0400	remote set-head
+8dcd4bff301480b3d4d35672e8ed842b0eed81fd 8dcd4bff301480b3d4d35672e8ed842b0eed81fd Benjamin Chang <benjamin@Benjamins-MacBook-Pro-2.local> 1745941342 -0400	remote set-head
+
+
+=== FILE: ./.git/logs/refs/remotes/origin/main ===
+d69c5d721de6ca11b066c56f00a9e0cc54268fc9 8dcd4bff301480b3d4d35672e8ed842b0eed81fd Benjamin <benjaminch3230@gmail.com> 1745941191 -0400	fetch --progress --prune --recurse-submodules=on-demand origin: fast-forward
+
+
+=== FILE: ./.git/hooks/commit-msg.sample ===
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+
+
+=== FILE: ./.git/hooks/pre-rebase.sample ===
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+
+
+=== FILE: ./.git/hooks/sendemail-validate.sample ===
+#!/bin/sh
+
+# An example hook script to validate a patch (and/or patch series) before
+# sending it via email.
+#
+# The hook should exit with non-zero status after issuing an appropriate
+# message if it wants to prevent the email(s) from being sent.
+#
+# To enable this hook, rename this file to "sendemail-validate".
+#
+# By default, it will only check that the patch(es) can be applied on top of
+# the default upstream branch without conflicts in a secondary worktree. After
+# validation (successful or not) of the last patch of a series, the worktree
+# will be deleted.
+#
+# The following config variables can be set to change the default remote and
+# remote ref that are used to apply the patches against:
+#
+#   sendemail.validateRemote (default: origin)
+#   sendemail.validateRemoteRef (default: HEAD)
+#
+# Replace the TODO placeholders with appropriate checks according to your
+# needs.
+
+validate_cover_letter () {
+	file="$1"
+	# TODO: Replace with appropriate checks (e.g. spell checking).
+	true
+}
+
+validate_patch () {
+	file="$1"
+	# Ensure that the patch applies without conflicts.
+	git am -3 "$file" || return
+	# TODO: Replace with appropriate checks for this patch
+	# (e.g. checkpatch.pl).
+	true
+}
+
+validate_series () {
+	# TODO: Replace with appropriate checks for the whole series
+	# (e.g. quick build, coding style checks, etc.).
+	true
+}
+
+# main -------------------------------------------------------------------------
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = 1
+then
+	remote=$(git config --default origin --get sendemail.validateRemote) &&
+	ref=$(git config --default HEAD --get sendemail.validateRemoteRef) &&
+	worktree=$(mktemp --tmpdir -d sendemail-validate.XXXXXXX) &&
+	git worktree add -fd --checkout "$worktree" "refs/remotes/$remote/$ref" &&
+	git config --replace-all sendemail.validateWorktree "$worktree"
+else
+	worktree=$(git config --get sendemail.validateWorktree)
+fi || {
+	echo "sendemail-validate: error: failed to prepare worktree" >&2
+	exit 1
+}
+
+unset GIT_DIR GIT_WORK_TREE
+cd "$worktree" &&
+
+if grep -q "^diff --git " "$1"
+then
+	validate_patch "$1"
+else
+	validate_cover_letter "$1"
+fi &&
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = "$GIT_SENDEMAIL_FILE_TOTAL"
+then
+	git config --unset-all sendemail.validateWorktree &&
+	trap 'git worktree remove -ff "$worktree"' EXIT &&
+	validate_series
+fi
+
+
+=== FILE: ./.git/hooks/pre-commit.sample ===
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff-index --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+
+
+=== FILE: ./.git/hooks/applypatch-msg.sample ===
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+
+
+=== FILE: ./.git/hooks/fsmonitor-watchman.sample ===
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	my $last_update_line = "";
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+		$last_update_line = qq[\n"since": $last_update_token,];
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {$last_update_line
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+
+
+=== FILE: ./.git/hooks/pre-receive.sample ===
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+
+
+=== FILE: ./.git/hooks/prepare-commit-msg.sample ===
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+
+
+=== FILE: ./.git/hooks/post-update.sample ===
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+
+
+=== FILE: ./.git/hooks/pre-merge-commit.sample ===
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+
+
+=== FILE: ./.git/hooks/pre-applypatch.sample ===
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+
+
+=== FILE: ./.git/hooks/pre-push.sample ===
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+
+
+=== FILE: ./.git/hooks/update.sample ===
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+
+
+=== FILE: ./.git/hooks/push-to-checkout.sample ===
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+
+
+=== FILE: ./.git/refs/heads/main ===
+8dcd4bff301480b3d4d35672e8ed842b0eed81fd
+
+
+=== FILE: ./.git/refs/remotes/origin/HEAD ===
+ref: refs/remotes/origin/main
+
+
+=== FILE: ./.git/refs/remotes/origin/main ===
+8dcd4bff301480b3d4d35672e8ed842b0eed81fd
+
+

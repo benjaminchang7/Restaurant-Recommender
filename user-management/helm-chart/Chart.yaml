@@ -1,0 +1,4 @@
+apiVersion: v2
+name: user-management
+version: 0.1.0
+description: User Management microservice for the Restaurant Recommendation System
