@@ -6,4 +6,4 @@ frontend_origin = "https://main.digjyfx9mucg6.amplifyapp.com"
 # JWT expiration in minutes
 jwt_expire_minutes = 30
 
-google_api_key = "AIzaSyAf2sym3U9ExPqOfm6gKTCToALEw-kzJAk"
+google_api_key = ""
